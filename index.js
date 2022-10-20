@@ -13,7 +13,11 @@ const SKYBOX_ASSETS = [
 ];
 const PERLIN_NOISE_TERRAIN_MAP = "noiseTexture.png";
 
-let canvas = null;
+const TERRAIN_SIZE = new THREE.Vector2(2048, 2048);
+const TERRAIN_NOISE_HEIGHT = 512;
+
+const GRAVITY_VECTOR = new CANNON.Vec3(0, -98.2, 0);
+const GRAVITATION_VECTOR_UNIT = GRAVITY_VECTOR.unit();
 
 let scene = null;
 let camera = null;
@@ -23,6 +27,9 @@ let renderer = null;
 let control = null;
 
 let physicsWorld = null;
+let cannonDebugger = null;
+
+let character = {loaded: false};
 
 function loadSkyboxTexture() {
 	let paths = [];
@@ -30,6 +37,10 @@ function loadSkyboxTexture() {
 		paths.push(ASSETS_DIR + "/" + SKYBOX_ASSETS[i]);
 	}
 	return paths;
+}
+
+function clamp(val, min, max) {
+	return Math.max(Math.min(val, max), min);
 }
 
 function generateTerrain() {
@@ -43,27 +54,64 @@ function generateTerrain() {
 		let tempContext = tempCanvas.getContext("2d");
 		tempContext.drawImage(terrainPerlinNoise, 0, 0);
 
-		let imageDataArray = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+		let imageData = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height).data;
+		let mapHeight = [];
+		for (let i = 0; i < terrainPerlinNoise.height; i++) {
+			mapHeight[i] = [];
+			for (let j = 0; j < terrainPerlinNoise.width; j++) {
+				let offset = (i * terrainPerlinNoise.width + j) * 4
+				mapHeight[i].push((imageData[offset] + imageData[offset + 1] + imageData[offset + 2]) / (3 * imageData[offset + 3]));
+			}
+		}
 		
+		let trimeshBuffer = [];
+		let trimeshIndex = [];
+		let individualVertexSize = new THREE.Vector2(TERRAIN_SIZE.x / mapHeight[0].length, TERRAIN_SIZE.y / mapHeight.length);
+		for (let i = 0; i < mapHeight.length + 1; i++) {
+			for (let j = 0; j < mapHeight[0].length + 1; j++) {
+				let height = 0;
+				height += mapHeight[clamp(i - 1, 0, 127)][clamp(j - 1, 0, 127)];
+				height += mapHeight[clamp(i - 1, 0, 127)][clamp(j, 0, 127)];
+				height += mapHeight[clamp(i, 0, 127)][clamp(j - 1, 0, 127)];
+				height += mapHeight[clamp(i, 0, 127)][clamp(j, 0, 127)];
+				height /= 4;
+				trimeshBuffer.push(individualVertexSize.x * j, TERRAIN_NOISE_HEIGHT * -height, individualVertexSize.y * i);
+			}
+		}
+
+		for (let i = 0; i < mapHeight.length; i++) {
+			let offset = (mapHeight[0].length + 1) * i;
+			let offsetNext = (mapHeight[0].length + 1) * (i + 1);
+			for (let j = 0; j < mapHeight[0].length; j++) {
+				trimeshIndex.push(offsetNext + j, offset + j + 1, offset + j);
+				trimeshIndex.push(offsetNext + j, offsetNext + j + 1, offset + j + 1);
+			}
+		}
+
+		let terrainGeometry = new THREE.BufferGeometry();
+		terrainGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(trimeshBuffer), 3));
+		terrainGeometry.setIndex(trimeshIndex);
+		terrainGeometry.computeVertexNormals();
+		let terrainMaterial = new THREE.MeshStandardMaterial({color: 0xff0000});
+		let terrain = new THREE.Mesh(terrainGeometry, terrainMaterial);
+		terrain.castShadow = true;
+		terrain.receiveShadow = true;
+		terrain.position.set(-1024, 0, -1024);
+		scene.add(terrain);
+
+		let body = new CANNON.Body({
+			type: CANNON.Body.STATIC,
+			shape: new CANNON.Trimesh(trimeshBuffer, trimeshIndex)
+		});
+		body.position.set(-1024, 0, -1024);
+		console.log(body.position);
+		physicsWorld.addBody(body);
 	});
 	terrainPerlinNoise.src = ASSETS_DIR + "/" + PERLIN_NOISE_TERRAIN_MAP;
+}
 
-	let terrainGeometry = new THREE.BufferGeometry();
-	let terrainVertices = new Float32Array([
-		-100, 0, -100,
-		-100, 0, 100,
-		100, 0, 100,
-
-		100, 0, 100,
-		100, 0, -100,
-		-100, 0, -100
-	]);
-	
-	terrainGeometry.setAttribute("position", new THREE.BufferAttribute(terrainVertices, 3 ));
-	let terrainMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-	let terrain = new THREE.Mesh(terrainGeometry, terrainMaterial);
-	
-	scene.add(terrain);
+function vector3ToVec3(vector3) {
+	return new CANNON.Vec3(vector3.x, vector3.y, vector3.z);
 }
 
 function createSkybox() {
@@ -91,14 +139,45 @@ function testCreateCharacter() {
 				}
 			});
 			object.scale.set(0.1, 0.1, 0.1);
-			
-			let boundingBox = new THREE.Box3().setFromObject(object);
-			let size = boundingBox.min.subVectors(boundingBox.max, boundingBox.min);
-			
-			control.target = new THREE.Vector3(object.position.x, object.position.y + size.y * 0.75, object.position.z);
-			camera.position.z = -16;
 
 			scene.add(object);
+			character.obj = object;
+			character.getBoundingBox = function() {
+				return new THREE.Box3().setFromObject(this.obj);
+			}
+			character.getSize = function() {
+				let boundingBox = this.getBoundingBox();
+				return boundingBox.min.subVectors(boundingBox.max, boundingBox.min);
+			}
+			character.getCameraCenter = function() {
+				return new THREE.Vector3(this.obj.position.x, this.obj.position.y + this.getSize().y * 0.75, this.obj.position.z);
+			}
+			character.getFeet = function() {
+				return new THREE.Vector3(this.obj.position.x, this.obj.position.y - 3, this.obj.position.z);
+			}
+			
+			control.target = character.getCameraCenter();
+			camera.position.z = -16;
+
+			let bodyBox = new CANNON.Body({
+				mass: 80, // kg
+				type: CANNON.Body.DYNAMIC,
+				shape: new CANNON.Sphere(3)
+			});
+			bodyBox.position = vector3ToVec3(character.getFeet());
+			physicsWorld.addBody(bodyBox);
+
+			character.bodyBox = bodyBox;
+			character.updatePositionFromBodyBox = function() {
+				this.obj.position.copy(this.bodyBox.position);
+				this.obj.position.y -= 3;
+			}
+			bodyBox.velocity.set(0, -1, 0);
+
+			character.loaded = true;
+
+			character.castShadow = true;
+			character.receiveShadow = true;
 		},
 		(xhr) => {
 			
@@ -110,8 +189,6 @@ function testCreateCharacter() {
 }
 
 function init() {
-	canvas = document.getElementById("main-canvas");
-	
 	scene = new THREE.Scene();
 	scene.background = new THREE.Color(0xababab);
 	
@@ -130,31 +207,118 @@ function init() {
 	control.maxDistance = 32;
 	control.minDistance = 16;
 	
-	scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+	let light = new THREE.PointLight(0xffffff, 1.0);
+	light.castShadow = true;
+	light.position.set(1000, 2000, 1000);
+	scene.add(light);
 
 	document.body.appendChild(renderer.domElement);
 
 	physicsWorld = new CANNON.World({
-		gravity: new CANNON.Vec3(0, 0, 0)
+		gravity: GRAVITY_VECTOR
 	});
 
-	const sphereBody = new CANNON.Body({
-		mass: 0, // kg
-		shape: new CANNON.Sphere(100),
-	});
-	sphereBody.position.set(0, 0, 0);
-	physicsWorld.addBody(sphereBody);
-	CannonDebugger(scene, physicsWorld);
+	// const groundBody = new CANNON.Body({
+	// 	type: CANNON.Body.STATIC,
+	// 	shape: new CANNON.Plane()
+	// });
+	// groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+	// physicsWorld.addBody(groundBody);
+
+	cannonDebugger = new CannonDebugger(scene, physicsWorld);
 	
 	createSkybox();
 	testCreateCharacter();
 	generateTerrain();
 }
 
+let directionVector = new THREE.Vector3(0, 0, 0);
+let characterMoving = false;
+let startFalling = false;
+
+function keyDown(e) {
+	if (character.loaded) {
+		let cameraTarget;
+		if (e.key == "w") {
+			character.bodyBox.wakeUp();
+			cameraTarget = vector3ToVec3(directionVector.subVectors(control.target.clone(), camera.position.clone())).unit();
+
+			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+
+			characterMoving = true;
+		}
+		else if (e.key == "a") {
+			character.bodyBox.wakeUp();
+			directionVector.subVectors(control.target.clone(), camera.position.clone());
+			directionVector.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+			cameraTarget = vector3ToVec3(directionVector).unit();
+
+			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+
+			characterMoving = true;
+		}
+		else if (e.key == "s") {
+			character.bodyBox.wakeUp();
+			directionVector.subVectors(control.target.clone(), camera.position.clone());
+			directionVector.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+			cameraTarget = vector3ToVec3(directionVector).unit();
+
+			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+
+			characterMoving = true;
+		}
+		else if (e.key == "d") {
+			character.bodyBox.wakeUp();
+			directionVector.subVectors(control.target.clone(), camera.position.clone());
+			directionVector.applyAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2);
+			cameraTarget = vector3ToVec3(directionVector).unit();
+
+			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+
+			characterMoving = true;
+		}
+	}
+}
+
+function keyUp(e) {
+	character.bodyBox.velocity.set(0, 0, 0);
+	character.bodyBox.applyForce(GRAVITY_VECTOR);
+	characterMoving = false;
+
+	startFalling = false;
+}
+
+window.addEventListener("keydown", keyDown);
+window.addEventListener("keyup", keyUp);
+
 function mainLoop() {
 	renderer.setSize(window.innerWidth, window.innerHeight);
 	camera.aspect = window.innerWidth / window.innerHeight;
 	camera.updateProjectionMatrix();
+	cannonDebugger.update();
+
+	if (character.loaded) {
+		character.updatePositionFromBodyBox();
+		
+		control.target = character.getCameraCenter();
+		
+		if (!characterMoving) {
+
+			if (!startFalling) {
+				character.bodyBox.sleep();
+				character.bodyBox.velocity.set(0, -1, 0);
+				character.bodyBox.wakeUp();
+				character.bodyBox.velocity.set(0, -1, 0);
+				startFalling = true;
+			}
+			let vec = character.bodyBox.velocity.unit();
+			if (startFalling && Math.abs(vec.dot(GRAVITATION_VECTOR_UNIT)) < 0.75 && vec.length() > 0 && character.bodyBox.sleepState == CANNON.BODY_SLEEP_STATES.AWAKE) {
+				character.bodyBox.sleep();
+			}
+		}
+	}
+
+	physicsWorld.fixedStep();
 	
 	control.update();
 	renderer.render(scene, camera);
