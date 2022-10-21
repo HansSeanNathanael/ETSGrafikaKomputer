@@ -19,6 +19,16 @@ const TERRAIN_NOISE_HEIGHT = 512;
 const GRAVITY_VECTOR = new CANNON.Vec3(0, -98.2, 0);
 const GRAVITATION_VECTOR_UNIT = GRAVITY_VECTOR.unit();
 
+const ANIMATION_DIR = "/animation";
+const CLOCK = new THREE.Clock(true);
+
+const ROTATION_VECTOR_AXIS = {
+	x: new THREE.Vector3(1, 0, 0), 
+	y: new THREE.Vector3(0, 1, 0), 
+	z: new THREE.Vector3(0, 0, 1)
+};
+const DEGREE_DOT_X = new THREE.Vector2(1, 0);
+
 let scene = null;
 let camera = null;
 
@@ -29,7 +39,7 @@ let control = null;
 let physicsWorld = null;
 let cannonDebugger = null;
 
-let character = {loaded: false};
+let character = {loaded: false, animation: []};
 
 function loadSkyboxTexture() {
 	let paths = [];
@@ -45,69 +55,78 @@ function clamp(val, min, max) {
 
 function generateTerrain() {
 
-	let terrainPerlinNoise = new Image();
-	terrainPerlinNoise.addEventListener("load", function() {
-		let tempCanvas = document.createElement("canvas");
-		tempCanvas.width = terrainPerlinNoise.width;
-		tempCanvas.height = terrainPerlinNoise.height;
+	new THREE.TextureLoader().load(
+		ASSETS_DIR + "/" + PERLIN_NOISE_TERRAIN_MAP, 
+	
+		function(texture) { // load callback
+			let terrainPerlinNoise = texture.image;
+			let tempCanvas = document.createElement("canvas");
+			tempCanvas.width = terrainPerlinNoise.width;
+			tempCanvas.height = terrainPerlinNoise.height;
 
-		let tempContext = tempCanvas.getContext("2d");
-		tempContext.drawImage(terrainPerlinNoise, 0, 0);
+			let tempContext = tempCanvas.getContext("2d");
+			tempContext.drawImage(terrainPerlinNoise, 0, 0);
 
-		let imageData = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height).data;
-		let mapHeight = [];
-		for (let i = 0; i < terrainPerlinNoise.height; i++) {
-			mapHeight[i] = [];
-			for (let j = 0; j < terrainPerlinNoise.width; j++) {
-				let offset = (i * terrainPerlinNoise.width + j) * 4
-				mapHeight[i].push((imageData[offset] + imageData[offset + 1] + imageData[offset + 2]) / (3 * imageData[offset + 3]));
+			let imageData = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height).data;
+			let mapHeight = [];
+			for (let i = 0; i < terrainPerlinNoise.height; i++) {
+				mapHeight[i] = [];
+				for (let j = 0; j < terrainPerlinNoise.width; j++) {
+					let offset = (i * terrainPerlinNoise.width + j) * 4
+					mapHeight[i].push((imageData[offset] + imageData[offset + 1] + imageData[offset + 2]) / (3 * imageData[offset + 3]));
+				}
 			}
-		}
-		
-		let trimeshBuffer = [];
-		let trimeshIndex = [];
-		let individualVertexSize = new THREE.Vector2(TERRAIN_SIZE.x / mapHeight[0].length, TERRAIN_SIZE.y / mapHeight.length);
-		for (let i = 0; i < mapHeight.length + 1; i++) {
-			for (let j = 0; j < mapHeight[0].length + 1; j++) {
-				let height = 0;
-				height += mapHeight[clamp(i - 1, 0, 127)][clamp(j - 1, 0, 127)];
-				height += mapHeight[clamp(i - 1, 0, 127)][clamp(j, 0, 127)];
-				height += mapHeight[clamp(i, 0, 127)][clamp(j - 1, 0, 127)];
-				height += mapHeight[clamp(i, 0, 127)][clamp(j, 0, 127)];
-				height /= 4;
-				trimeshBuffer.push(individualVertexSize.x * j, TERRAIN_NOISE_HEIGHT * -height, individualVertexSize.y * i);
+			
+			let trimeshBuffer = [];
+			let trimeshIndex = [];
+			let individualVertexSize = new THREE.Vector2(TERRAIN_SIZE.x / mapHeight[0].length, TERRAIN_SIZE.y / mapHeight.length);
+			for (let i = 0; i < mapHeight.length + 1; i++) {
+				for (let j = 0; j < mapHeight[0].length + 1; j++) {
+					let height = 0;
+					height += mapHeight[clamp(i - 1, 0, 127)][clamp(j - 1, 0, 127)];
+					height += mapHeight[clamp(i - 1, 0, 127)][clamp(j, 0, 127)];
+					height += mapHeight[clamp(i, 0, 127)][clamp(j - 1, 0, 127)];
+					height += mapHeight[clamp(i, 0, 127)][clamp(j, 0, 127)];
+					height /= 4;
+					trimeshBuffer.push(individualVertexSize.x * j, TERRAIN_NOISE_HEIGHT * -height, individualVertexSize.y * i);
+				}
 			}
-		}
 
-		for (let i = 0; i < mapHeight.length; i++) {
-			let offset = (mapHeight[0].length + 1) * i;
-			let offsetNext = (mapHeight[0].length + 1) * (i + 1);
-			for (let j = 0; j < mapHeight[0].length; j++) {
-				trimeshIndex.push(offsetNext + j, offset + j + 1, offset + j);
-				trimeshIndex.push(offsetNext + j, offsetNext + j + 1, offset + j + 1);
+			for (let i = 0; i < mapHeight.length; i++) {
+				let offset = (mapHeight[0].length + 1) * i;
+				let offsetNext = (mapHeight[0].length + 1) * (i + 1);
+				for (let j = 0; j < mapHeight[0].length; j++) {
+					trimeshIndex.push(offsetNext + j, offset + j + 1, offset + j);
+					trimeshIndex.push(offsetNext + j, offsetNext + j + 1, offset + j + 1);
+				}
 			}
+
+			let terrainGeometry = new THREE.BufferGeometry();
+			terrainGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(trimeshBuffer), 3));
+			terrainGeometry.setIndex(trimeshIndex);
+			terrainGeometry.computeVertexNormals();
+			let terrainMaterial = new THREE.MeshStandardMaterial({map: texture});
+			let terrain = new THREE.Mesh(terrainGeometry, terrainMaterial);
+			terrain.castShadow = true;
+			terrain.receiveShadow = true;
+			terrain.shadowSide = THREE.DoubleSide;
+			terrain.position.set(-1024, 0, -1024);
+			scene.add(terrain);
+
+			let body = new CANNON.Body({
+				type: CANNON.Body.STATIC,
+				shape: new CANNON.Trimesh(trimeshBuffer, trimeshIndex)
+			});
+			body.position.set(-1024, 0, -1024);
+			physicsWorld.addBody(body);
+		},
+
+		undefined, // progress callback
+
+		function(error) { // error callback
+			console.log(error); 
 		}
-
-		let terrainGeometry = new THREE.BufferGeometry();
-		terrainGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(trimeshBuffer), 3));
-		terrainGeometry.setIndex(trimeshIndex);
-		terrainGeometry.computeVertexNormals();
-		let terrainMaterial = new THREE.MeshStandardMaterial({color: 0xff0000});
-		let terrain = new THREE.Mesh(terrainGeometry, terrainMaterial);
-		terrain.castShadow = true;
-		terrain.receiveShadow = true;
-		terrain.position.set(-1024, 0, -1024);
-		scene.add(terrain);
-
-		let body = new CANNON.Body({
-			type: CANNON.Body.STATIC,
-			shape: new CANNON.Trimesh(trimeshBuffer, trimeshIndex)
-		});
-		body.position.set(-1024, 0, -1024);
-		console.log(body.position);
-		physicsWorld.addBody(body);
-	});
-	terrainPerlinNoise.src = ASSETS_DIR + "/" + PERLIN_NOISE_TERRAIN_MAP;
+	);
 }
 
 function vector3ToVec3(vector3) {
@@ -131,11 +150,12 @@ function createSkybox() {
 function testCreateCharacter() {
 	const loader = new FBXLoader();
 	loader.load(ASSETS_DIR + "/character.fbx", 
-		(object) => {
-			object.traverse( function ( child ) {
+		function (object) {
+			object.traverse( function (child) {
 				if ( child.isMesh ) {
 					child.castShadow = true;
 					child.receiveShadow = true;
+					child.material.shadowSide = THREE.FrontSide;
 				}
 			});
 			object.scale.set(0.1, 0.1, 0.1);
@@ -174,18 +194,76 @@ function testCreateCharacter() {
 			}
 			bodyBox.velocity.set(0, -1, 0);
 
+			object.setRotationFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+
 			character.loaded = true;
 
-			character.castShadow = true;
-			character.receiveShadow = true;
+			let mixer = new THREE.AnimationMixer(object);
+			character.animationMixer = mixer;
+			let clip = character.animationMixer.clipAction(object.animations[0]);
+			character.animationMixer.currentAnimation = clip;
+			character.animationMixer.startAnimationByName = function (name) {
+				for (let i = 0; i < this._actions.length; i++) {
+					if (this._actions[i]._clip.name == name && this.currentAnimation != this._actions[i]) {
+						// this.currentAnimation.crossFadeTo(this._actions[i], 10);
+						// console.log(this._actions[i]);
+						// console.log(this.currentAnimation);
+
+						this.currentAnimation.fadeOut(0.2);
+						
+						this._actions[i].weight = 1;
+						this._actions[i].reset();
+						this._actions[i].fadeIn(0.2);
+						this._actions[i].play();
+
+						this.currentAnimation = this._actions[i];
+					}
+				}
+			};
+
+			character.obj.animations.findByName = function(name) {
+				for (let i = 0; i < character.obj.animations.length; i++) {
+					if (character.obj.animations[i].name === name) {
+						return character.obj.animations[i];
+					}
+				}
+				return null;
+			}
+
+			loader.load(ASSETS_DIR + ANIMATION_DIR + "/breathing_idle.fbx",
+				function (object) {
+					object.scale.set(0.1, 0.1, 0.1);
+					object.animations[0].name = "breathing_idle";
+
+					character.obj.animations.push(object.animations[0]);
+					let animationClip = character.animationMixer.clipAction(object.animations[0]);
+
+					character.animationMixer.startAnimationByName("breathing_idle");
+				},
+				undefined,
+				function (error) {
+					console.log(error);
+				}
+			);
+			loader.load(ASSETS_DIR + ANIMATION_DIR + "/running.fbx",
+				function (object) {
+					object.scale.set(0.1, 0.1, 0.1);
+					object.animations[0].name = "running";
+
+					character.obj.animations.push(object.animations[0]);
+					let animationClip = character.animationMixer.clipAction(object.animations[0]);
+				},
+				undefined,
+				function (error) {
+					console.log(error);
+				}
+			);
 		},
-		(xhr) => {
-			
-		},
-		(error) => {
+		undefined,
+		function (error) {
 			console.log(error);
 		}
-	)
+	);
 }
 
 function init() {
@@ -197,6 +275,8 @@ function init() {
 	
 	renderer = new THREE.WebGLRenderer();
 	renderer.setSize(window.innerWidth, window.innerHeight);
+	renderer.shadowMap.enabled = true;
+	renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 	
 	control = new OrbitControls(camera, renderer.domElement);
 	control.listenToKeyEvents( window );
@@ -209,7 +289,9 @@ function init() {
 	
 	let light = new THREE.PointLight(0xffffff, 1.0);
 	light.castShadow = true;
-	light.position.set(1000, 2000, 1000);
+	light.position.set(2000, 2000, 2000);
+	light.shadow.camera.near = 0.5;
+	light.shadow.camera.far = 7000;
 	scene.add(light);
 
 	document.body.appendChild(renderer.domElement);
@@ -218,14 +300,7 @@ function init() {
 		gravity: GRAVITY_VECTOR
 	});
 
-	// const groundBody = new CANNON.Body({
-	// 	type: CANNON.Body.STATIC,
-	// 	shape: new CANNON.Plane()
-	// });
-	// groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
-	// physicsWorld.addBody(groundBody);
-
-	cannonDebugger = new CannonDebugger(scene, physicsWorld);
+	// cannonDebugger = new CannonDebugger(scene, physicsWorld);
 	
 	createSkybox();
 	testCreateCharacter();
@@ -244,8 +319,18 @@ function keyDown(e) {
 			cameraTarget = vector3ToVec3(directionVector.subVectors(control.target.clone(), camera.position.clone())).unit();
 
 			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+			// character.obj.setRotationFromAxisAngle(
+			// 	ROTATION_VECTOR_AXIS.y, new Vector2(cameraTarget.x, cameraTarget.z).normalize().angle() + Math.PI / 2
+			// );
+			character.obj.setRotationFromAxisAngle(
+				ROTATION_VECTOR_AXIS.y, -new THREE.Vector2(cameraTarget.x, cameraTarget.z).normalize().angle() + Math.PI / 2
+			);
+			// console.log(character.obj.rotation._y);
+			// console.log(new Vector2(cameraTarget.x, cameraTarget.z).normalize().angle());
 
 			characterMoving = true;
+
+			character.animationMixer.startAnimationByName("running");
 		}
 		else if (e.key == "a") {
 			character.bodyBox.wakeUp();
@@ -254,8 +339,14 @@ function keyDown(e) {
 			cameraTarget = vector3ToVec3(directionVector).unit();
 
 			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+			
+			character.obj.setRotationFromAxisAngle(
+				ROTATION_VECTOR_AXIS.y, -new THREE.Vector2(cameraTarget.x, cameraTarget.z).normalize().angle() + Math.PI / 2
+			);
 
 			characterMoving = true;
+
+			character.animationMixer.startAnimationByName("running");
 		}
 		else if (e.key == "s") {
 			character.bodyBox.wakeUp();
@@ -264,8 +355,14 @@ function keyDown(e) {
 			cameraTarget = vector3ToVec3(directionVector).unit();
 
 			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+			
+			character.obj.setRotationFromAxisAngle(
+				ROTATION_VECTOR_AXIS.y, -new THREE.Vector2(cameraTarget.x, cameraTarget.z).normalize().angle() + Math.PI / 2
+			);
 
 			characterMoving = true;
+
+			character.animationMixer.startAnimationByName("running");
 		}
 		else if (e.key == "d") {
 			character.bodyBox.wakeUp();
@@ -274,8 +371,14 @@ function keyDown(e) {
 			cameraTarget = vector3ToVec3(directionVector).unit();
 
 			character.bodyBox.velocity.set(100 * cameraTarget.x, character.bodyBox.velocity.y, 100 * cameraTarget.z);
+			
+			character.obj.setRotationFromAxisAngle(
+				ROTATION_VECTOR_AXIS.y, -new THREE.Vector2(cameraTarget.x, cameraTarget.z).normalize().angle() + Math.PI / 2
+			);
 
 			characterMoving = true;
+
+			character.animationMixer.startAnimationByName("running");
 		}
 	}
 }
@@ -286,6 +389,7 @@ function keyUp(e) {
 	characterMoving = false;
 
 	startFalling = false;
+	character.animationMixer.startAnimationByName("breathing_idle");
 }
 
 window.addEventListener("keydown", keyDown);
@@ -295,7 +399,7 @@ function mainLoop() {
 	renderer.setSize(window.innerWidth, window.innerHeight);
 	camera.aspect = window.innerWidth / window.innerHeight;
 	camera.updateProjectionMatrix();
-	cannonDebugger.update();
+	// cannonDebugger.update();
 
 	if (character.loaded) {
 		character.updatePositionFromBodyBox();
@@ -306,7 +410,6 @@ function mainLoop() {
 
 			if (!startFalling) {
 				character.bodyBox.sleep();
-				character.bodyBox.velocity.set(0, -1, 0);
 				character.bodyBox.wakeUp();
 				character.bodyBox.velocity.set(0, -1, 0);
 				startFalling = true;
@@ -316,6 +419,7 @@ function mainLoop() {
 				character.bodyBox.sleep();
 			}
 		}
+		character.animationMixer.update(CLOCK.getDelta());
 	}
 
 	physicsWorld.fixedStep();
